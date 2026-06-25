@@ -1,6 +1,18 @@
+import { randomBytes } from "node:crypto";
+
 function generatePassword(length: number = 16): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  return Array.from({ length }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  const max = 256 - (256 % chars.length);
+  let key = "";
+  while (key.length < length) {
+    for (const byte of randomBytes(length)) {
+      if (byte < max) {
+        key += chars[byte % chars.length];
+        if (key.length === length) break;
+      }
+    }
+  }
+  return key;
 }
 
 export enum UserSettingKey {
