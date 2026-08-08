@@ -32,6 +32,16 @@ const WEBRTC_DATA_CHANNEL_LABEL = "layla-datachannel";
 const CHUNK_SIZE = 16_000;
 const MAX_SERVER_LOGS_TO_DISPLAY = 500;
 
+// RTCDataChannel.send() never blocks: anything the peer has not yet drained
+// accumulates in libwebrtc's *native* outgoing buffer, which does not appear in
+// the JS heap. If llama.cpp generates faster than the phone consumes, that
+// buffer grows without limit until send() starts throwing OperationError.
+// Pause sending above the high-water mark and resume once it drains below the
+// low mark.
+const DC_BUFFER_HIGH_WATER = 4 * 1024 * 1024; // 4 MB
+const DC_BUFFER_LOW_WATER = 1 * 1024 * 1024; // 1 MB
+const DC_DRAIN_TIMEOUT_MS = 30_000;
+
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
 type LogType = "INFO" | "WARN" | "ERROR" | "RTC" | "SSE" | "SERVER";
@@ -43,6 +53,7 @@ interface LaylaServerTransportMessage {
 }
 
 interface LogEntry {
+  id: number;
   ts: string;
   type: LogType;
   msg: string;
@@ -71,6 +82,38 @@ function wrapMessages(
   }
   messages.push({ sessionId, type: "end", payload: "" });
   return messages;
+}
+
+/**
+ * Resolves once the channel's outgoing buffer has drained below the low-water
+ * mark, or immediately if it is already below it / the channel is not open.
+ * Falls back to a timeout so a stalled peer can never hang a stream forever.
+ */
+function waitForDataChannelDrain(dc: RTCDataChannel): Promise<void> {
+  if (dc.readyState !== "open" || dc.bufferedAmount <= DC_BUFFER_LOW_WATER) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve) => {
+    let settled = false;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      dc.removeEventListener("bufferedamountlow", finish);
+      dc.removeEventListener("close", finish);
+      dc.removeEventListener("error", finish);
+      resolve();
+    };
+
+    const timer = setTimeout(finish, DC_DRAIN_TIMEOUT_MS);
+
+    dc.bufferedAmountLowThreshold = DC_BUFFER_LOW_WATER;
+    dc.addEventListener("bufferedamountlow", finish);
+    dc.addEventListener("close", finish);
+    dc.addEventListener("error", finish);
+  });
 }
 
 function getFilenameFromPath(path: string): string {
@@ -220,7 +263,11 @@ const ModelCard: React.FC<{
   </div>
 );
 
-const LogViewer: React.FC<{ logs: LogEntry[] }> = ({ logs }) => {
+const LogViewer: React.FC<{
+  logs: LogEntry[];
+  verboseSse: boolean;
+  onToggleVerboseSse: () => void;
+}> = ({ logs, verboseSse, onToggleVerboseSse }) => {
   const [expanded, setExpanded] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -229,14 +276,21 @@ const LogViewer: React.FC<{ logs: LogEntry[] }> = ({ logs }) => {
   }, []);
 
   useEffect(() => {
-    if (expanded && scrollRef.current) {
-      setTimeout(() => {
-        scrollRef.current?.scrollTo({
-          top: scrollRef.current.scrollHeight,
-          behavior: "smooth",
-        });
-      }, 100);
-    }
+    if (!expanded || !scrollRef.current) return;
+
+    // A new log line can arrive per streamed token. Scheduling an uncleared
+    // timer (and a queued smooth-scroll animation) for each one leaves
+    // thousands of pending callbacks and animation states alive during a
+    // stream. Clearing on cleanup means only the latest scroll is ever
+    // pending, and "auto" avoids stacking interrupted scroll animations.
+    const timer = setTimeout(() => {
+      scrollRef.current?.scrollTo({
+        top: scrollRef.current.scrollHeight,
+        behavior: "auto",
+      });
+    }, 100);
+
+    return () => clearTimeout(timer);
   }, [logs, expanded]);
 
   const levelColor = (l: LogType) => {
@@ -255,6 +309,16 @@ const LogViewer: React.FC<{ logs: LogEntry[] }> = ({ logs }) => {
       <button className="log-header" onClick={toggle}>
         <span className="section-label">SERVER LOGS</span>
         <div className="log-header-right">
+          <span
+            className={`log-verbose-toggle${verboseSse ? " log-verbose-toggle--on" : ""}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleVerboseSse();
+            }}
+            title="Log the full body of every SSE chunk. Increases memory use significantly during long generations."
+          >
+            VERBOSE
+          </span>
           <span className="log-count-badge">{logs.length}</span>
           <span className={`chevron ${expanded ? "chevron-open" : ""}`}>▼</span>
         </div>
@@ -262,8 +326,8 @@ const LogViewer: React.FC<{ logs: LogEntry[] }> = ({ logs }) => {
 
       {expanded && (
         <div className="log-scroll" ref={scrollRef}>
-          {logs.map((entry, i) => (
-            <div key={`${entry.ts}-${i}`} className="log-row">
+          {logs.map((entry) => (
+            <div key={entry.id} className="log-row">
               <span className="log-ts">{entry.ts}</span>
               <span
                 className="log-level"
@@ -319,11 +383,13 @@ const LlmServerPanel: React.FC<{
   const [status, setStatus] = useState("Idle");
   const [logs, setLogs] = useState<LogEntry[]>([
     {
+      id: 0,
       type: "INFO",
       ts: generateTimestamp(),
       msg: 'Welcome to Layla Server! Click "START SERVER" to launch your local LLM server.',
     },
   ]);
+  const logIdRef = useRef(1);
   const serverTransitioningRef = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
   const [welcomeVisible, setWelcomeVisible] = useState(false);
@@ -348,6 +414,40 @@ const LlmServerPanel: React.FC<{
   const bufferedRequestRef = useRef("");
   const streamAbortControllerRef = useRef<AbortController | null>(null);
 
+  // ── Request queue ──
+  // llama-server processes one completion at a time. Firing a second request
+  // while one is in flight either queues unbounded inside llama.cpp, drops the
+  // first connection mid-stream, or exhausts VRAM with overlapping inference —
+  // all of which can kill the backend. These refs serialise requests so the
+  // backend only ever sees one at a time.
+  const requestQueueRef = useRef<string[]>([]);
+  const queueRunningRef = useRef(false);
+
+  // ── Verbose SSE logging ──
+  // Logging every SSE chunk means one React state update per generated token.
+  // Sustained over a long generation that grows renderer memory by hundreds of
+  // MB, so it is off by default and opt-in for debugging a stream. Mirrored
+  // into a ref so the streaming loop reads the live value mid-stream.
+  const [verboseSse, setVerboseSse] = useState(false);
+  const verboseSseRef = useRef(false);
+  useEffect(() => {
+    verboseSseRef.current = verboseSse;
+  }, [verboseSse]);
+
+  const toggleVerboseSse = useCallback(() => {
+    setVerboseSse((prev) => {
+      const next = !prev;
+      verboseSseRef.current = next;
+      UserSettingsService.saveSetting(
+        UserSettingKey.VERBOSE_SSE_LOGGING,
+        next,
+      ).catch(() => {
+        /* non-fatal: setting just will not persist */
+      });
+      return next;
+    });
+  }, []);
+
   // ── Model info ──
   const [modelName, setModelName] = useState("No model loaded");
   const [modelPath, setModelPath] = useState<string | null>(null);
@@ -361,9 +461,10 @@ const LlmServerPanel: React.FC<{
 
   const addLog = (level: LogType, msg: string) => {
     const ts = generateTimestamp();
+    const id = logIdRef.current++;
     setLogs((prev) => [
       ...prev.slice(-(MAX_SERVER_LOGS_TO_DISPLAY - 1)),
-      { ts, type: level, msg },
+      { id, ts, type: level, msg },
     ]);
   };
 
@@ -399,27 +500,47 @@ const LlmServerPanel: React.FC<{
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        const chunkText = decoder.decode(value, { stream: true });
-        addLog("SSE", `Stream chunk:\n${chunkText}`);
+          const chunkText = decoder.decode(value, { stream: true });
 
-        // Forward chunk to peer via data channel
-        const sid = sessionIdRef.current ?? "unknown";
-        const messages = wrapMessages(sid, chunkText);
-        for (const msg of messages) {
-          if (
-            dataChannelRef.current &&
-            dataChannelRef.current.readyState === "open"
-          ) {
+          if (verboseSseRef.current) {
+            addLog("SSE", `Stream chunk:\n${chunkText}`);
+          }
+
+          // Forward chunk to peer via data channel
+          const sid = sessionIdRef.current ?? "unknown";
+          const messages = wrapMessages(sid, chunkText);
+          for (const msg of messages) {
+            const channel = dataChannelRef.current;
+            if (!channel || channel.readyState !== "open") continue;
+
+            // Back-pressure: if the peer is consuming slower than llama.cpp is
+            // producing, wait for the native send buffer to drain rather than
+            // piling more onto it (which grows process memory and eventually
+            // makes send() throw).
+            if (channel.bufferedAmount > DC_BUFFER_HIGH_WATER) {
+              await waitForDataChannelDrain(channel);
+              if (channel.readyState !== "open") continue;
+            }
+
             try {
-              dataChannelRef.current.send(JSON.stringify(msg));
+              channel.send(JSON.stringify(msg));
             } catch (e: any) {
               addLog("ERROR", `Failed to send over DataChannel: ${e.message}`);
             }
           }
+        }
+      } finally {
+        // On abort the loop exits via throw; without cancelling, the response
+        // body and its buffers stay referenced until GC eventually notices.
+        try {
+          await reader.cancel();
+        } catch {
+          /* already closed */
         }
       }
 
@@ -429,11 +550,34 @@ const LlmServerPanel: React.FC<{
     }
   }, []);
 
+  /**
+   * Drains the request queue one item at a time, awaiting each stream to
+   * completion before starting the next. Re-entrant calls are no-ops: whichever
+   * call is already draining will pick up newly pushed items on its next pass.
+   */
+  const processQueue = useCallback(async () => {
+    if (queueRunningRef.current) return; // already draining
+    queueRunningRef.current = true;
+
+    try {
+      while (requestQueueRef.current.length > 0) {
+        const nextRequest = requestQueueRef.current.shift()!;
+        await streamToLocalServer(nextRequest);
+      }
+    } finally {
+      queueRunningRef.current = false;
+    }
+  }, [streamToLocalServer]);
+
   const handleCommand = useCallback((cmd: string) => {
     addLog("INFO", `Received command: ${cmd}`);
     if (cmd === "stop") {
       streamAbortControllerRef.current?.abort();
-      addLog("INFO", "Stream aborted by command");
+      // Drop anything still waiting — an explicit stop should not be followed
+      // by queued prompts continuing to generate.
+      requestQueueRef.current = [];
+      queueRunningRef.current = false;
+      addLog("INFO", "Stream aborted and queue cleared by command");
     } else {
       addLog("WARN", `Unknown command: ${cmd}`);
     }
@@ -528,7 +672,10 @@ const LlmServerPanel: React.FC<{
                 } else if (chunk.type === "chunk") {
                   bufferedRequestRef.current += chunk.payload;
                 } else if (chunk.type === "end") {
-                  streamToLocalServer(bufferedRequestRef.current);
+                  // Enqueue rather than firing immediately, so rapid
+                  // back-to-back prompts never overlap on the backend.
+                  requestQueueRef.current.push(bufferedRequestRef.current);
+                  processQueue();
                 } else if (chunk.type === "cmd") {
                   handleCommand(chunk.payload);
                 }
@@ -730,15 +877,28 @@ const LlmServerPanel: React.FC<{
         resolve();
         return;
       }
-      const timer = setTimeout(resolve, ms);
-      signal?.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
+
+      // The same AbortSignal is reused for every iteration of the polling
+      // loop. `{ once: true }` only detaches the listener if abort actually
+      // fires — on a normal timeout it stays attached forever, so one listener
+      // accumulated per sleep and each retained closure pinned its timer and
+      // scope. Always detach explicitly instead.
+      const onAbort = () => {
+        clearTimeout(timer);
+        cleanup();
+        resolve();
+      };
+
+      const cleanup = () => {
+        signal?.removeEventListener("abort", onAbort);
+      };
+
+      const timer = setTimeout(() => {
+        cleanup();
+        resolve();
+      }, ms);
+
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
 
   /** Wait for a DataChannel to reach "open" state, with a timeout. */
@@ -783,8 +943,15 @@ const LlmServerPanel: React.FC<{
     peerConnectionRef.current = null;
     dataChannelRef.current = null;
 
+    // Abort any in-flight stream and drop queued requests so nothing is left
+    // pointing at a backend that is going away.
+    streamAbortControllerRef.current?.abort();
+    requestQueueRef.current = [];
+    queueRunningRef.current = false;
+
     // it is important to update the running state immediately to avoid async function calls trying to use the old RTC connection after we've initiated shutdown
     runningRef.current = false;
+    setRunning(false);
 
     await window.electronBridge.stopServer();
   };
@@ -807,7 +974,11 @@ const LlmServerPanel: React.FC<{
       );
     }
 
+    // Set the ref synchronously: createRtcOffer()'s polling loop reads
+    // runningRef.current immediately and would exit at once if it were still
+    // false. setRunning drives the UI; the sync effect below keeps them aligned.
     runningRef.current = true;
+    setRunning(true);
   };
 
   const handleToggle = async () => {
@@ -851,6 +1022,7 @@ const LlmServerPanel: React.FC<{
       UserSettingKey.SERVER_SECRET_KEY,
       UserSettingKey.VISION_MODEL_PATH,
       UserSettingKey.LOCAL_SERVER_URL,
+      UserSettingKey.VERBOSE_SSE_LOGGING,
     ]);
 
     const mp = settings[UserSettingKey.MODEL_PATH];
@@ -859,6 +1031,7 @@ const LlmServerPanel: React.FC<{
     const vmp = settings[UserSettingKey.VISION_MODEL_PATH];
     const ssk = settings[UserSettingKey.SERVER_SECRET_KEY];
     const lsu = settings[UserSettingKey.LOCAL_SERVER_URL];
+    const verbose = settings[UserSettingKey.VERBOSE_SSE_LOGGING];
 
     setServerSecret(ssk);
     serverSecretRef.current = ssk;
@@ -867,6 +1040,8 @@ const LlmServerPanel: React.FC<{
     additionalArgsRef.current = aa;
     localServerPathRef.current = lsp;
     localServerUrlRef.current = lsu;
+    setVerboseSse(verbose);
+    verboseSseRef.current = verbose;
 
     if (!mp) {
       setWelcomeVisible(true);
@@ -883,9 +1058,16 @@ const LlmServerPanel: React.FC<{
   };
 
   // ── Effects ──
+  // Keep the ref in sync with state so async closures (the RTC polling loop)
+  // can read the current value without capturing a stale one. React state is
+  // the source of truth for rendering; the ref is a mirror of it.
+  //
+  // Note: a ref mutation is invisible to React's dependency comparison, so the
+  // reverse of this (setRunning(runningRef.current) on [runningRef.current])
+  // cannot reliably drive a re-render.
   useEffect(() => {
-    setRunning(runningRef.current);
-  }, [runningRef.current]);
+    runningRef.current = running;
+  }, [running]);
 
   useEffect(() => {
     const removeStdout = window.electronBridge.onServerStdout((data) => {
@@ -896,9 +1078,38 @@ const LlmServerPanel: React.FC<{
       addLog("INFO", `[stderr] ${data}`);
     });
 
+    const removeExit = window.electronBridge.onServerExit(({ code, signal }) => {
+      // A clean stop also fires this event, but shutdownServer() has already
+      // cleared runningRef by then — so this guard leaves only unexpected exits.
+      if (!runningRef.current) return;
+
+      const reason = signal ? `signal ${signal}` : `code ${code}`;
+      addLog("ERROR", `llama.cpp server exited unexpectedly (${reason})`);
+
+      // Stop the RTC polling loop and drop anything still queued for a backend
+      // that no longer exists.
+      runningRef.current = false;
+      setRunning(false);
+      streamAbortControllerRef.current?.abort();
+      requestQueueRef.current = [];
+      queueRunningRef.current = false;
+
+      try {
+        dataChannelRef.current?.close();
+        peerConnectionRef.current?.close();
+      } catch {
+        /* ignore */
+      }
+      peerConnectionRef.current = null;
+      dataChannelRef.current = null;
+
+      setStatus("Server crashed — press Start to restart");
+    });
+
     return () => {
       removeStdout();
       removeStderr();
+      removeExit();
     };
   }, []);
 
@@ -943,7 +1154,11 @@ const LlmServerPanel: React.FC<{
           <Header running={running} status={status} onSettings={goToSettings} />
           <PowerButton running={running} onToggle={handleToggle} />
           <ModelCard name={modelName} path={modelPath || ""} tags={modelTags} />
-          <LogViewer logs={logs} />
+          <LogViewer
+            logs={logs}
+            verboseSse={verboseSse}
+            onToggleVerboseSse={toggleVerboseSse}
+          />
         </div>
       </div>
 
@@ -1200,6 +1415,27 @@ const cssStyles = `
 }
 
 /* ── Log Viewer ── */
+.log-verbose-toggle {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  padding: 3px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--dim-text);
+  cursor: pointer;
+  user-select: none;
+}
+.log-verbose-toggle:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.log-verbose-toggle--on {
+  border-color: #fbbf24;
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.1);
+}
+
 .log-container {
   background-color: ${C.cardBg};
   border-radius: 12px;

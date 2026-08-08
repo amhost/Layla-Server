@@ -7,6 +7,9 @@ export interface ElectronAPI {
   getDeviceName: () => Promise<string>;
   onServerStdout: (callback: (data: string) => void) => () => void; // returns a cleanup function
   onServerStderr: (callback: (data: string) => void) => () => void; // returns a cleanup function
+  onServerExit: (
+    callback: (info: { code: number | null; signal: string | null }) => void,
+  ) => () => void; // returns a cleanup function
   showAlert: (title: string, message: string) => Promise<void>;
 }
 
