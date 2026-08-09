@@ -140,6 +140,9 @@ ipcMain.handle(
       serverProcess.on("exit", (code, signal) => {
         console.log(`Server exited with code ${code}, signal ${signal}`);
         serverProcess = null;
+        // Notify the renderer so the UI can reflect that the backend is gone.
+        // Uses the same one-way IPC pattern as server:stdout / server:stderr.
+        mainWindow?.webContents.send("server:exit", { code, signal });
       });
     });
   }

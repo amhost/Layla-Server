@@ -10,6 +10,7 @@ export enum UserSettingKey {
   LOCAL_SERVER_PATH = 'local-server-path',
   ADDITIONAL_SERVER_CMD_ARGS = 'additional-server-cmd-args',
   SERVER_SECRET_KEY = 'server-secret-key',
+  VERBOSE_SSE_LOGGING = 'verbose-sse-logging',
 }
 
 type UserSettingDefaults = {
@@ -19,6 +20,7 @@ type UserSettingDefaults = {
   [UserSettingKey.LOCAL_SERVER_PATH]: string;
   [UserSettingKey.ADDITIONAL_SERVER_CMD_ARGS]: string | null;
   [UserSettingKey.SERVER_SECRET_KEY]: string;
+  [UserSettingKey.VERBOSE_SSE_LOGGING]: boolean;
 };
 
 export const USER_SETTING_DEFAULTS: {
@@ -30,6 +32,10 @@ export const USER_SETTING_DEFAULTS: {
   [UserSettingKey.LOCAL_SERVER_PATH]: './resources/server/llama-server.exe',
   [UserSettingKey.ADDITIONAL_SERVER_CMD_ARGS]: null,
   [UserSettingKey.SERVER_SECRET_KEY]: generatePassword(),
+  // Logging every SSE chunk drives a React state update per token. Sustained,
+  // that grows renderer memory by hundreds of MB per long generation, so it is
+  // opt-in and intended only for debugging a stream.
+  [UserSettingKey.VERBOSE_SSE_LOGGING]: false,
 };
 
 const STORAGE_PREFIX = 'user-setting:';

@@ -29,6 +29,21 @@ contextBridge.exposeInMainWorld("electronBridge", {
     },
 
     /**
+     * Subscribe to the llama.cpp server process exiting (crash or clean stop).
+     * Returns a cleanup function, same as onServerStdout / onServerStderr.
+     */
+    onServerExit: (
+        callback: (info: { code: number | null; signal: string | null }) => void,
+    ) => {
+        const listener = (
+            _event: Electron.IpcRendererEvent,
+            info: { code: number | null; signal: string | null },
+        ) => callback(info);
+        ipcRenderer.on("server:exit", listener);
+        return () => ipcRenderer.removeListener("server:exit", listener);
+    },
+
+    /**
      * Stop the llama.cpp server process.
      */
     stopServer: (): Promise<void> => {
