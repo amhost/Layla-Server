@@ -31,22 +31,62 @@ jobs:
         id: llama
         shell: bash
         run: |
+          set -euo pipefail
+
           # Fetch all asset download URLs from the latest release
-          RELEASE=$(curl -s https://api.github.com/repos/ggml-org/llama.cpp/releases/latest)
-          TAG=$(echo "$RELEASE" | jq -r '.tag_name')
+          RELEASE=$(curl -fsSL https://api.github.com/repos/ggml-org/llama.cpp/releases/latest)
+          TAG=$(echo "$RELEASE" | jq -er '.tag_name')
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Latest llama.cpp release: $TAG"
 
           # List all assets so we can see exact names
-          echo "$RELEASE" | jq -r '.assets[].name' | head -30
+          echo "$RELEASE" | jq -r '.assets[:30][].name'
 
-          # Find and download the CUDA binary (13.1 only)
-          CUDA_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("bin-win-cuda-13\\.1-x64\\.zip$")) | select(.name | test("cudart") | not) | .browser_download_url')
+          # Pick the highest CUDA version that has both a binary and runtime asset.
+          CUDA_VERSION=$(echo "$RELEASE" | jq -er '
+            [
+              .assets[].name
+              | select(test("^llama-.*-bin-win-cuda-[0-9]+\\.[0-9]+-x64\\.zip$"))
+              | capture("cuda-(?<version>[0-9]+\\.[0-9]+)-x64\\.zip$").version
+            ] as $binary_versions
+            | [
+                .assets[].name
+                | select(test("^cudart-llama-bin-win-cuda-[0-9]+\\.[0-9]+-x64\\.zip$"))
+                | capture("cuda-(?<version>[0-9]+\\.[0-9]+)-x64\\.zip$").version
+                | select(. as $version | $binary_versions | index($version))
+              ]
+            | unique
+            | sort_by(split(".") | map(tonumber))
+            | last
+          ') || {
+            echo "::error::No matching Windows x64 CUDA binary and CUDART asset pair found in llama.cpp release $TAG"
+            exit 1
+          }
+          echo "Selected CUDA version: $CUDA_VERSION"
+
+          ASSET_SUFFIX="bin-win-cuda-${CUDA_VERSION}-x64.zip"
+
+          # Find and download the matching CUDA binary.
+          CUDA_URL=$(echo "$RELEASE" | jq -er --arg suffix "$ASSET_SUFFIX" '
+            first(
+              .assets[]
+              | select(.name | endswith($suffix))
+              | select(.name | startswith("cudart-") | not)
+              | .browser_download_url
+            )
+          ')
           echo "CUDA binary URL: $CUDA_URL"
           curl -fL -o llama-cuda.zip "$CUDA_URL"
 
-          # Find and download the CUDA runtime (13.1 only)
-          CUDART_URL=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("cudart.*cuda-13\\.1-x64\\.zip$")) | .browser_download_url')
+          # Find and download the runtime for the same CUDA version.
+          CUDART_URL=$(echo "$RELEASE" | jq -er --arg suffix "$ASSET_SUFFIX" '
+            first(
+              .assets[]
+              | select(.name | startswith("cudart-"))
+              | select(.name | endswith($suffix))
+              | .browser_download_url
+            )
+          ')
           echo "CUDART URL: $CUDART_URL"
           curl -fL -o llama-cudart.zip "$CUDART_URL"
 
