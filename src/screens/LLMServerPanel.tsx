@@ -4,43 +4,49 @@ import UserSettingsService, {
   UserSettingKey,
 } from "../services/user-settings-service";
 import { WelcomeModal } from "../components/WelcomeModal";
+import {
+  MONO_FONT_STACK,
+  PALETTE,
+  UI_FONT_STACK,
+  scrollbarCss,
+} from "../theme";
+import { useInjectedStyles } from "../hooks/useInjectedStyles";
+import { sleep, waitForAbort } from "../utils/async";
+import {
+  LaylaServerTransportMessage,
+  WEBRTC_DATA_CHANNEL_LABEL,
+  closeRtcConnection,
+  sendTransportMessage,
+  waitForDataChannelOpen,
+  waitForIceGatheringComplete,
+  wrapMessages,
+} from "../utils/webrtc";
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
 
 const C = {
-  background: "#1a1a1a",
-  text: "#ffffff",
-  secondaryText: "#aaaaaa",
-  primary: "#47a6ff",
-  danger: "#ff6347",
-  border: "#333333",
-  success: "#34d399",
-  warning: "#fbbf24",
-  surface: "#282828",
-  surfaceHover: "#2e2e2e",
-  cardBg: "#252525",
-  logBg: "#1a1a1a",
-  dimText: "#888888",
-  accentGlow: "rgba(71, 166, 255, 0.25)",
-  dangerGlow: "rgba(255, 99, 71, 0.25)",
-  successGlow: "rgba(52, 211, 153, 0.20)",
+  background: PALETTE.background,
+  text: PALETTE.brightText,
+  secondaryText: PALETTE.mutedText,
+  primary: PALETTE.primary,
+  danger: PALETTE.danger,
+  border: PALETTE.border,
+  success: PALETTE.success,
+  warning: PALETTE.warning,
+  surface: PALETTE.surface,
+  surfaceHover: PALETTE.surfaceHover,
+  cardBg: PALETTE.cardBg,
+  logBg: PALETTE.background,
+  dimText: PALETTE.dimText,
 };
 
 const LAYLA_SIGNALLING_URL =
   "https://layla-signalling-production.up.railway.app";
-const WEBRTC_DATA_CHANNEL_LABEL = "layla-datachannel";
-const CHUNK_SIZE = 16_000;
 const MAX_SERVER_LOGS_TO_DISPLAY = 500;
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
 type LogType = "INFO" | "WARN" | "ERROR" | "RTC" | "SSE" | "SERVER";
-
-interface LaylaServerTransportMessage {
-  sessionId: string;
-  type: "start" | "chunk" | "end" | "cmd";
-  payload: string;
-}
 
 interface LogEntry {
   ts: string;
@@ -54,24 +60,6 @@ const generateTimestamp = (offsetMs = 0): string => {
   const d = new Date(Date.now() - offsetMs);
   return d.toLocaleTimeString("en-GB", { hour12: false });
 };
-
-function wrapMessages(
-  sessionId: string,
-  fullPayload: string,
-): LaylaServerTransportMessage[] {
-  const messages: LaylaServerTransportMessage[] = [
-    { sessionId, type: "start", payload: "" },
-  ];
-  for (let i = 0; i < fullPayload.length; i += CHUNK_SIZE) {
-    messages.push({
-      sessionId,
-      type: "chunk",
-      payload: fullPayload.slice(i, i + CHUNK_SIZE),
-    });
-  }
-  messages.push({ sessionId, type: "end", payload: "" });
-  return messages;
-}
 
 function getFilenameFromPath(path: string): string {
   let filename = path.split("/").pop();
@@ -408,18 +396,10 @@ const LlmServerPanel: React.FC<{
 
         // Forward chunk to peer via data channel
         const sid = sessionIdRef.current ?? "unknown";
-        const messages = wrapMessages(sid, chunkText);
-        for (const msg of messages) {
-          if (
-            dataChannelRef.current &&
-            dataChannelRef.current.readyState === "open"
-          ) {
-            try {
-              dataChannelRef.current.send(JSON.stringify(msg));
-            } catch (e: any) {
-              addLog("ERROR", `Failed to send over DataChannel: ${e.message}`);
-            }
-          }
+        for (const msg of wrapMessages(sid, chunkText)) {
+          sendTransportMessage(dataChannelRef.current, msg, (error) =>
+            addLog("ERROR", `Failed to send over DataChannel: ${error}`),
+          );
         }
       }
 
@@ -460,12 +440,11 @@ const LlmServerPanel: React.FC<{
           // ── Tear down any previous connection ──────────────────────────
           if (peerConnectionRef.current) {
             addLog("WARN", "Existing RTC peer connection found, closing…");
-            try {
-              dataChannelRef.current?.close();
-              peerConnectionRef.current.close();
-            } catch (e: any) {
-              addLog("ERROR", `Failed to close existing peer: ${e.message}`);
-            }
+            closeRtcConnection(
+              peerConnectionRef.current,
+              dataChannelRef.current,
+              (error) => addLog("ERROR", `Failed to close existing peer: ${error}`),
+            );
             peerConnectionRef.current = null;
             dataChannelRef.current = null;
           }
@@ -568,16 +547,7 @@ const LlmServerPanel: React.FC<{
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
 
-          await new Promise<void>((resolve) => {
-            if (pc!.iceGatheringState === "complete") {
-              resolve();
-              return;
-            }
-            pc!.onicegatheringstatechange = () => {
-              if (pc!.iceGatheringState === "complete") resolve();
-            };
-            setTimeout(resolve, 10_000);
-          });
+          await waitForIceGatheringComplete(pc, 10_000);
 
           const localSdp = pc.localDescription?.sdp;
           if (!localSdp) {
@@ -681,13 +651,7 @@ const LlmServerPanel: React.FC<{
           // The dc.onclose / onconnectionstatechange handlers abort the
           // controller, so we just await that signal.
           if (answerReceived && runningRef.current) {
-            await new Promise<void>((resolve) => {
-              if (signal.aborted) {
-                resolve();
-                return;
-              }
-              signal.addEventListener("abort", () => resolve(), { once: true });
-            });
+            await waitForAbort(signal);
             addLog("RTC", "Connection ended, will retry…");
           }
         } catch (e: any) {
@@ -698,12 +662,7 @@ const LlmServerPanel: React.FC<{
           }
         } finally {
           // ── Per-iteration cleanup: tear down this attempt's resources ──
-          try {
-            dc?.close();
-          } catch (_) {}
-          try {
-            pc?.close();
-          } catch (_) {}
+          closeRtcConnection(pc, dc);
 
           if (peerConnectionRef.current === pc)
             peerConnectionRef.current = null;
@@ -721,65 +680,12 @@ const LlmServerPanel: React.FC<{
     }
   };
 
-  // ── Helpers ─────────────────────────────────────────────────────────────────
-
-  /** Sleep that can be cancelled via an AbortSignal. */
-  const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
-    new Promise((resolve) => {
-      if (signal?.aborted) {
-        resolve();
-        return;
-      }
-      const timer = setTimeout(resolve, ms);
-      signal?.addEventListener(
-        "abort",
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
-
-  /** Wait for a DataChannel to reach "open" state, with a timeout. */
-  const waitForDataChannelOpen = (
-    dc: RTCDataChannel,
-    timeoutMs: number,
-  ): Promise<boolean> =>
-    new Promise((resolve) => {
-      if (dc.readyState === "open") {
-        resolve(true);
-        return;
-      }
-
-      const abortCtrl = new AbortController();
-
-      const timer = setTimeout(() => {
-        abortCtrl.abort();
-        resolve(false);
-      }, timeoutMs);
-
-      dc.addEventListener(
-        "open",
-        () => {
-          clearTimeout(timer);
-          resolve(true);
-        },
-        { once: true, signal: abortCtrl.signal },
-      );
-    });
-
   // ── Server lifecycle ──
 
   const shutdownServer = async () => {
     addLog("INFO", "Shutting down llama.cpp server…");
 
-    try {
-      dataChannelRef.current?.close();
-      peerConnectionRef.current?.close();
-    } catch {
-      /* ignore */
-    }
+    closeRtcConnection(peerConnectionRef.current, dataChannelRef.current);
     peerConnectionRef.current = null;
     dataChannelRef.current = null;
 
@@ -925,14 +831,11 @@ const LlmServerPanel: React.FC<{
     );
 
     return () => {
-      try {
-        dataChannelRef.current?.close();
-        peerConnectionRef.current?.close();
-      } catch {
-        /* ignore */
-      }
+      closeRtcConnection(peerConnectionRef.current, dataChannelRef.current);
     };
   }, []);
+
+  useInjectedStyles(cssStyles);
 
   // ── Render ──
 
@@ -961,8 +864,6 @@ const LlmServerPanel: React.FC<{
           loadSettings();
         }}
       />
-
-      <style>{cssStyles}</style>
     </>
   );
 };
@@ -985,7 +886,7 @@ const cssStyles = `
   background-color: ${C.background};
   min-height: 100vh;
   overflow-y: auto;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: ${UI_FONT_STACK};
   color: ${C.text};
 }
 
@@ -1250,16 +1151,7 @@ const cssStyles = `
   border-top: 1px solid ${C.border};
   padding: 8px 12px 12px;
 }
-.log-scroll::-webkit-scrollbar {
-  width: 6px;
-}
-.log-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-.log-scroll::-webkit-scrollbar-thumb {
-  background: ${C.border};
-  border-radius: 3px;
-}
+${scrollbarCss(".log-scroll")}
 .log-row {
   display: flex;
   align-items: flex-start;
@@ -1270,7 +1162,7 @@ const cssStyles = `
 .log-ts {
   color: ${C.dimText};
   font-size: 11px;
-  font-family: 'Cascadia Mono', 'Fira Code', 'Consolas', monospace;
+  font-family: ${MONO_FONT_STACK};
   line-height: 16px;
   width: 72px;
   flex-shrink: 0;
@@ -1280,7 +1172,7 @@ const cssStyles = `
 .log-level {
   font-size: 11px;
   font-weight: 700;
-  font-family: 'Cascadia Mono', 'Fira Code', 'Consolas', monospace;
+  font-family: ${MONO_FONT_STACK};
   line-height: 16px;
   width: 48px;
   flex-shrink: 0;
@@ -1291,7 +1183,7 @@ const cssStyles = `
   flex: 1;
   color: ${C.secondaryText};
   font-size: 11px;
-  font-family: 'Cascadia Mono', 'Fira Code', 'Consolas', monospace;
+  font-family: ${MONO_FONT_STACK};
   line-height: 16px;
   white-space: pre-wrap;
   word-break: break-word;
@@ -1337,7 +1229,7 @@ const cssStyles = `
   text-align: center;
   margin-bottom: 10px;
   user-select: text;
-  font-family: 'Cascadia Mono', 'Fira Code', monospace;
+  font-family: ${MONO_FONT_STACK};
   letter-spacing: 1px;
 }
 .modal-hint {

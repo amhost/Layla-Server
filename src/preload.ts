@@ -1,5 +1,14 @@
 import { contextBridge, ipcRenderer } from "electron";
 
+/**
+ * Subscribe to a main-process channel, returning a cleanup function.
+ */
+function subscribe(channel: string, callback: (data: string) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, data: string) => callback(data);
+    ipcRenderer.on(channel, listener);
+    return () => ipcRenderer.removeListener(channel, listener);
+}
+
 contextBridge.exposeInMainWorld("electronBridge", {
     getAppVersion: (): Promise<string> => ipcRenderer.invoke("get-app-version"),
     openExternal: (url: string) => ipcRenderer.send("open-external", url),
@@ -16,17 +25,8 @@ contextBridge.exposeInMainWorld("electronBridge", {
         return ipcRenderer.invoke('server:start', serverPath, modelPath, visionModelPath, additionalArgs);
     },
 
-    onServerStdout: (callback: (data: string) => void) => {
-        const listener = (_event: Electron.IpcRendererEvent, data: string) => callback(data);
-        ipcRenderer.on("server:stdout", listener);
-        // Return a cleanup function
-        return () => ipcRenderer.removeListener("server:stdout", listener);
-    },
-    onServerStderr: (callback: (data: string) => void) => {
-        const listener = (_event: Electron.IpcRendererEvent, data: string) => callback(data);
-        ipcRenderer.on("server:stderr", listener);
-        return () => ipcRenderer.removeListener("server:stderr", listener);
-    },
+    onServerStdout: (callback: (data: string) => void) => subscribe("server:stdout", callback),
+    onServerStderr: (callback: (data: string) => void) => subscribe("server:stderr", callback),
 
     /**
      * Stop the llama.cpp server process.

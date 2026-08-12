@@ -4,6 +4,8 @@ import React, { useState } from "react";
 import UserSettingsService, {
   UserSettingKey,
 } from "../services/user-settings-service";
+import { useInjectedStyles } from "../hooks/useInjectedStyles";
+import { PALETTE, UI_FONT_STACK } from "../theme";
 
 interface ModelInfo {
   category: string;
@@ -63,6 +65,8 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({
   onClose,
 }) => {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+
+  useInjectedStyles(cssStyles);
 
   const handleDownload = (url: string) => {
     try {
@@ -187,29 +191,28 @@ export const WelcomeModal: React.FC<WelcomeModalProps> = ({
           </div>
         </div>
       </div>
-      <style>{cssStyles}</style>
     </>
   );
 };
 
 const cssStyles = `
 :root {
-  --wm-primary: #47a6ff;
-  --wm-background: #1c1c1c;
-  --wm-text: #e0e0e0;
-  --wm-secondary-text: #aaaaaa;
-  --wm-border: #333333;
-  --wm-success: #34d399;
-  --wm-warning: #fbbf24;
-  --wm-surface: #282828;
-  --wm-surface-hover: #2e2e2e;
-  --wm-card-bg: #252525;
-  --wm-log-bg: #1a1a1a;
-  --wm-dim-text: #888888;
-  --wm-accent-glow: rgba(71, 166, 255, 0.25);
-  --wm-danger-glow: rgba(255, 99, 71, 0.25);
-  --wm-success-glow: rgba(52, 211, 153, 0.2);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --wm-primary: ${PALETTE.primary};
+  --wm-background: ${PALETTE.panelBackground};
+  --wm-text: ${PALETTE.softText};
+  --wm-secondary-text: ${PALETTE.mutedText};
+  --wm-border: ${PALETTE.border};
+  --wm-success: ${PALETTE.success};
+  --wm-warning: ${PALETTE.warning};
+  --wm-surface: ${PALETTE.surface};
+  --wm-surface-hover: ${PALETTE.surfaceHover};
+  --wm-card-bg: ${PALETTE.cardBg};
+  --wm-log-bg: ${PALETTE.background};
+  --wm-dim-text: ${PALETTE.dimText};
+  --wm-accent-glow: ${PALETTE.accentGlow};
+  --wm-danger-glow: ${PALETTE.dangerGlow};
+  --wm-success-glow: ${PALETTE.successGlow};
+  font-family: ${UI_FONT_STACK};
 }
 
 /* ── Overlay ── */
