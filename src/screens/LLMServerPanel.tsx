@@ -29,14 +29,14 @@ const C = {
 const LAYLA_SIGNALLING_URL =
   "https://layla-signalling-production.up.railway.app";
 const WEBRTC_DATA_CHANNEL_LABEL = "layla-datachannel";
-const CHUNK_SIZE = 16_000;
+export const CHUNK_SIZE = 16_000;
 const MAX_SERVER_LOGS_TO_DISPLAY = 500;
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
-type LogType = "INFO" | "WARN" | "ERROR" | "RTC" | "SSE" | "SERVER";
+export type LogType = "INFO" | "WARN" | "ERROR" | "RTC" | "SSE" | "SERVER";
 
-interface LaylaServerTransportMessage {
+export interface LaylaServerTransportMessage {
   sessionId: string;
   type: "start" | "chunk" | "end" | "cmd";
   payload: string;
@@ -50,12 +50,12 @@ interface LogEntry {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
-const generateTimestamp = (offsetMs = 0): string => {
+export const generateTimestamp = (offsetMs = 0): string => {
   const d = new Date(Date.now() - offsetMs);
   return d.toLocaleTimeString("en-GB", { hour12: false });
 };
 
-function wrapMessages(
+export function wrapMessages(
   sessionId: string,
   fullPayload: string,
 ): LaylaServerTransportMessage[] {
@@ -73,7 +73,7 @@ function wrapMessages(
   return messages;
 }
 
-function getFilenameFromPath(path: string): string {
+export function getFilenameFromPath(path: string): string {
   let filename = path.split("/").pop();
   filename = (filename ?? path).split("\\").pop();
   if (!filename) return path;
@@ -81,7 +81,7 @@ function getFilenameFromPath(path: string): string {
   return filename;
 }
 
-function extractTags(name: string): string[] {
+export function extractTags(name: string): string[] {
   const tags = new Set<string>();
   const sizeMatch = name.match(/(?:^|[\W_])(\d+(?:\.\d+)?[Bb])(?:[\W_]|$)/);
   if (sizeMatch?.[1]) tags.add(sizeMatch[1].toUpperCase());
