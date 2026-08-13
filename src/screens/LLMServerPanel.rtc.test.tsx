@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import LlmServerPanel from "./LLMServerPanel";
+import { parked } from "../../test/parked-fetch";
 import UserSettingsService, {
   UserSettingKey,
 } from "../services/user-settings-service";
@@ -20,7 +21,9 @@ class FakeDataChannel extends EventTarget {
   onmessage: ((event: { data: unknown }) => void) | null = null;
   send = vi.fn();
   close = vi.fn(() => {
+    if (this.readyState === "closed") return;
     this.readyState = "closed";
+    this.onclose?.();
   });
 }
 
@@ -47,16 +50,6 @@ class FakePeerConnection {
   setRemoteDescription = vi.fn(async () => undefined);
   close = vi.fn();
 }
-
-/** A request that never resolves, but rejects like fetch does when aborted. */
-const parked = (signal?: AbortSignal) =>
-  new Promise<Response>((_resolve, reject) => {
-    signal?.addEventListener(
-      "abort",
-      () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
-      { once: true },
-    );
-  });
 
 function jsonResponse(body: unknown): Response {
   return {
@@ -140,7 +133,6 @@ afterEach(async () => {
   for (const stop of screen.queryAllByRole("button", { name: "Stop server" })) {
     await userEvent.click(stop);
   }
-  await new Promise((resolve) => setTimeout(resolve, 1100));
   vi.unstubAllGlobals();
 });
 
@@ -406,7 +398,7 @@ describe("LlmServerPanel signalling", () => {
     const pc = await startPanel();
     pc.dataChannel.onclose!();
 
-    await waitFor(() => screen.getByText("DataChannel CLOSED"));
+    await waitFor(() => screen.getAllByText("DataChannel CLOSED"));
     await waitFor(
       () => expect(FakePeerConnection.instances.length).toBeGreaterThan(1),
       { timeout: 4000 },

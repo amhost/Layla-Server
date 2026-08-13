@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import LlmServerPanel from "./LLMServerPanel";
+import { parked } from "../../test/parked-fetch";
 import UserSettingsService, {
   UserSettingKey,
 } from "../services/user-settings-service";
@@ -15,7 +16,11 @@ class FakeDataChannel {
   onclose: (() => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
   send = vi.fn();
-  close = vi.fn();
+  close = vi.fn(() => {
+    if (this.readyState === "closed") return;
+    this.readyState = "closed";
+    this.onclose?.();
+  });
   addEventListener = vi.fn();
 }
 
@@ -46,7 +51,7 @@ class FakePeerConnection {
 
 /** Never-settling fetch keeps the signalling poll parked mid-request. */
 function parkedFetch() {
-  return vi.fn(() => new Promise<Response>(() => {}));
+  return vi.fn((_url: string, init?: RequestInit) => parked(init?.signal ?? undefined));
 }
 
 async function seedModel(path = "C:\\models\\Cydonia-24B-v4.3-Q4_K_M.gguf") {
@@ -81,7 +86,11 @@ beforeEach(() => {
   vi.stubGlobal("fetch", parkedFetch());
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Stop the server so the signalling retry loop does not outlive the test.
+  for (const stop of screen.queryAllByRole("button", { name: "Stop server" })) {
+    await userEvent.click(stop);
+  }
   vi.unstubAllGlobals();
 });
 

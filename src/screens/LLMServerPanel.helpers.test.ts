@@ -107,9 +107,10 @@ describe("generateTimestamp", () => {
     const now = generateTimestamp();
     const oneHourAgo = generateTimestamp(3_600_000);
 
+    const hNow = Number(now.split(":")[0]);
+    const hAgo = Number(oneHourAgo.split(":")[0]);
+
     expect(oneHourAgo).not.toBe(now);
-    expect(
-      Number(now.split(":")[0]) - Number(oneHourAgo.split(":")[0]),
-    ).toBeCloseTo(1);
+    expect((hNow - hAgo + 24) % 24).toBe(1);
   });
 });

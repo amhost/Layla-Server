@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import SettingsPage from "./SettingsPage";
@@ -18,6 +18,10 @@ async function renderSettings() {
   await waitFor(() => serverUrlInput());
   return { onBack };
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("SettingsPage", () => {
   it("shows the app version and the stored setting values once loaded", async () => {
@@ -64,7 +68,7 @@ describe("SettingsPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => screen.getByText("Failed to save settings"));
-    saveSetting.mockRestore();
+    expect(saveSetting).toHaveBeenCalled();
   });
 
   it("resets a single modified setting back to its default", async () => {
