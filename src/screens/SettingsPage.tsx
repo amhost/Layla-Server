@@ -1,26 +1,28 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import UserSettingsService, {
   UserSettingKey,
-  USER_SETTING_DEFAULTS,
+  settingDefaultAsString,
 } from "../services/user-settings-service";
+import { useInjectedStyles } from "../hooks/useInjectedStyles";
+import { PALETTE, UI_FONT_STACK, scrollbarCss } from "../theme";
 
 // ─── Theme ──────────────────────────────────────────────────────────────────────
 const C = {
-  primary: "#47a6ff",
-  primaryDim: "rgba(71,166,255,0.12)",
-  primaryBorder: "rgba(71,166,255,0.30)",
-  bg: "#1c1c1c",
-  cardBg: "#222222",
-  cardBgHover: "#272727",
-  danger: "#ff6347",
-  dangerDim: "rgba(255,99,71,0.12)",
-  border: "#343434",
-  borderLight: "#3e3e3e",
-  text: "#e8e8e8",
-  secondaryText: "#999999",
-  dimText: "#888888",
-  inputBg: "#2a2a2a",
-  tagBg: "rgba(71,166,255,0.08)",
+  primary: PALETTE.primary,
+  primaryDim: PALETTE.primaryDim,
+  primaryBorder: PALETTE.primaryBorder,
+  bg: PALETTE.panelBackground,
+  cardBg: PALETTE.settingsCardBg,
+  cardBgHover: PALETTE.settingsCardBgHover,
+  danger: PALETTE.danger,
+  dangerDim: PALETTE.dangerDim,
+  border: PALETTE.borderStrong,
+  borderLight: PALETTE.borderLight,
+  text: PALETTE.text,
+  secondaryText: PALETTE.secondaryText,
+  dimText: PALETTE.dimText,
+  inputBg: PALETTE.inputBg,
+  tagBg: PALETTE.primaryTint,
 };
 
 // ─── Setting metadata ───────────────────────────────────────────────────────────
@@ -106,7 +108,7 @@ const styles = `
     height: 100%;
     background: ${C.bg};
     color: ${C.text};
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: ${UI_FONT_STACK};
     overflow: hidden;
   }
 
@@ -190,19 +192,7 @@ const styles = `
     overflow-y: auto;
     padding: 28px 32px 0;
   }
-  .sp-body::-webkit-scrollbar {
-    width: 6px;
-  }
-  .sp-body::-webkit-scrollbar-track {
-    background: transparent;
-  }
-  .sp-body::-webkit-scrollbar-thumb {
-    background: ${C.border};
-    border-radius: 3px;
-  }
-  .sp-body::-webkit-scrollbar-thumb:hover {
-    background: ${C.borderLight};
-  }
+  ${scrollbarCss(".sp-body", { thumb: C.border, thumbHover: C.borderLight })}
 
   /* Section */
   .sp-section {
@@ -554,8 +544,7 @@ const SettingRow: React.FC<SettingRowProps> = ({
   onClear,
 }) => {
   const [focused, setFocused] = useState(false);
-  const defaultValue = USER_SETTING_DEFAULTS[meta.key];
-  const isModified = value !== (defaultValue ?? "");
+  const isModified = value !== settingDefaultAsString(meta.key);
 
   const pickFile = useCallback(async () => {
     try {
@@ -658,20 +647,8 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onBack }) => {
   const [dirty, setDirty] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const styleInjected = useRef(false);
 
-  // Inject scoped styles once
-  useEffect(() => {
-    if (styleInjected.current) return;
-    styleInjected.current = true;
-    const el = document.createElement("style");
-    el.textContent = styles;
-    document.head.appendChild(el);
-    return () => {
-      document.head.removeChild(el);
-      styleInjected.current = false;
-    };
-  }, []);
+  useInjectedStyles(styles);
 
   // get app version
   useEffect(() => {
@@ -680,16 +657,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onBack }) => {
 
   // Load settings on mount
   useEffect(() => {
-    (async () => {
-      const loaded = await UserSettingsService.getMultipleSettings(
-        Object.values(UserSettingKey),
-      );
-      const mapped: Record<string, string> = {};
-      for (const k of Object.values(UserSettingKey)) {
-        mapped[k] = (loaded as any)[k] ?? "";
-      }
-      setSettings(mapped as Record<UserSettingKey, string>);
-    })();
+    UserSettingsService.getAllSettingsAsStrings().then(setSettings);
   }, []);
 
   const showToast = useCallback((msg: string) => {
@@ -705,8 +673,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onBack }) => {
 
   const handleClear = useCallback(
     (key: UserSettingKey) => {
-      const def = (USER_SETTING_DEFAULTS[key] as string) ?? "";
-      handleChange(key, def);
+      handleChange(key, settingDefaultAsString(key));
     },
     [handleChange],
   );
@@ -716,12 +683,7 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onBack }) => {
     setSaving(true);
     try {
       for (const k of Object.values(UserSettingKey)) {
-        const val = settings[k];
-        if (val == null) {
-          await UserSettingsService.removeSetting(k);
-        } else {
-          await UserSettingsService.saveSetting(k, val as any);
-        }
+        await UserSettingsService.saveSetting(k, settings[k] ?? null);
       }
       setDirty(false);
       showToast("Settings saved");
@@ -733,11 +695,11 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onBack }) => {
   }, [settings, showToast]);
 
   const handleResetAll = useCallback(() => {
-    const defaults: Record<string, string> = {};
+    const defaults = {} as Record<UserSettingKey, string>;
     for (const k of Object.values(UserSettingKey)) {
-      defaults[k] = (USER_SETTING_DEFAULTS[k] as string) ?? "";
+      defaults[k] = settingDefaultAsString(k);
     }
-    setSettings(defaults as Record<UserSettingKey, string>);
+    setSettings(defaults);
     setDirty(true);
   }, []);
 

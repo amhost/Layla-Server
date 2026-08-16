@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from "electron";
 import * as path from "path";
 import os from 'os';
 import { spawn, exec, ChildProcess } from "child_process";
+import type { Readable } from "stream";
 
 let mainWindow: BrowserWindow | null = null;
 const isWindows = process.platform === "win32";
@@ -75,6 +76,13 @@ ipcMain.on("open-external", (_event, url: string) => {
 
 let serverProcess: ChildProcess | null = null;
 
+/** Pipe a child process stream to the renderer over the given channel. */
+function forwardOutput(stream: Readable | null, channel: string): void {
+  stream?.on("data", (data) => {
+    mainWindow?.webContents.send(channel, data.toString());
+  });
+}
+
 function killProcess(child: ChildProcess): Promise<void> {
   return new Promise((resolve, reject) => {
     if (isWindows) {
@@ -120,13 +128,8 @@ ipcMain.handle(
         ...(isWindows && { detached: false }),
       });
 
-      serverProcess.stdout?.on("data", (data) => {
-        mainWindow?.webContents.send("server:stdout", data.toString());
-      });
-
-      serverProcess.stderr?.on("data", (data) => {
-        mainWindow?.webContents.send("server:stderr", data.toString());
-      });
+      forwardOutput(serverProcess.stdout, "server:stdout");
+      forwardOutput(serverProcess.stderr, "server:stderr");
 
       serverProcess.on("spawn", () => {
         resolve(`Server started with PID ${serverProcess?.pid}`);

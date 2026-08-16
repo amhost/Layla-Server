@@ -1,11 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  CHUNK_SIZE,
   extractTags,
   generateTimestamp,
   getFilenameFromPath,
-  wrapMessages,
 } from "./LLMServerPanel";
+import { CHUNK_SIZE, wrapMessages } from "../utils/webrtc";
 
 afterEach(() => {
   vi.useRealTimers();
