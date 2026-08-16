@@ -38,6 +38,10 @@ export function closeRtcConnection(
 ): void {
   try {
     dataChannel?.close();
+  } catch (e: any) {
+    onError?.(e.message);
+  }
+  try {
     peerConnection?.close();
   } catch (e: any) {
     onError?.(e.message);
