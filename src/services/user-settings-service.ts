@@ -1,11 +1,9 @@
-import { randomBytes } from "node:crypto";
-
 function generatePassword(length: number = 16): string {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   const max = 256 - (256 % chars.length);
   let key = "";
   while (key.length < length) {
-    for (const byte of randomBytes(length)) {
+    for (const byte of globalThis.crypto.getRandomValues(new Uint8Array(length))) {
       if (byte < max) {
         key += chars[byte % chars.length];
         if (key.length === length) break;
