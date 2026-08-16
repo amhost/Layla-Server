@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog, Menu, shell } from "electron";
 import * as path from "path";
 import os from 'os';
 import { spawn, exec, ChildProcess } from "child_process";
-import { Readable } from "stream";
+import type { Readable } from "stream";
 
 let mainWindow: BrowserWindow | null = null;
 const isWindows = process.platform === "win32";
