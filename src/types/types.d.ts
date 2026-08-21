@@ -10,6 +10,9 @@ export interface ElectronAPI {
   onServerExit: (
     callback: (info: { code: number | null; signal: string | null }) => void,
   ) => () => void; // returns a cleanup function
+  probeBackend: (
+    baseUrl: string,
+  ) => Promise<{ ok: boolean; models: string[]; error?: string }>;
   showAlert: (title: string, message: string) => Promise<void>;
 }
 

@@ -124,6 +124,23 @@ function getFilenameFromPath(path: string): string {
   return filename;
 }
 
+/**
+ * Best-effort label for an endpoint we do not launch, so the card can say
+ * "Ollama" rather than just a URL. Derived from the port rather than stored:
+ * pass-through mode is expressed entirely by the existing server settings.
+ */
+function describeEndpoint(url: string): string {
+  try {
+    const port = new URL(url).port;
+    if (port === "1234") return "LM Studio";
+    if (port === "11434") return "Ollama";
+    if (port === "8080") return "llama.cpp server";
+  } catch {
+    /* not a parseable URL — fall through to the generic label */
+  }
+  return "External server";
+}
+
 function extractTags(name: string): string[] {
   const tags = new Set<string>();
   const sizeMatch = name.match(/(?:^|[\W_])(\d+(?:\.\d+)?[Bb])(?:[\W_]|$)/);
@@ -238,13 +255,18 @@ const Chip: React.FC<{ label: string }> = ({ label }) => (
 );
 
 const ModelCard: React.FC<{
+  label: string;
   name: string;
   path: string;
   tags: string[];
-}> = ({ name, path, tags }) => (
+  onChange: () => void;
+}> = ({ label, name, path, tags, onChange }) => (
   <div className="card">
-    <div className="card-header">
-      <span className="section-label">ACTIVE MODEL</span>
+    <div className="card-header card-header-row">
+      <span className="section-label">{label}</span>
+      <button className="card-change-btn" onClick={onChange}>
+        Change
+      </button>
     </div>
     <div className="card-body">
       <div className="model-image-container">
@@ -393,6 +415,9 @@ const LlmServerPanel: React.FC<{
   const serverTransitioningRef = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
   const [welcomeVisible, setWelcomeVisible] = useState(false);
+  // First run has nothing to fall back to, so the modal is not dismissible;
+  // reopening it later via "Change" is.
+  const [welcomeDismissible, setWelcomeDismissible] = useState(false);
   const runningRef = useRef(running);
 
   // ── Settings refs ──
@@ -449,6 +474,7 @@ const LlmServerPanel: React.FC<{
   }, []);
 
   // ── Model info ──
+  const [modelCardLabel, setModelCardLabel] = useState("ACTIVE MODEL");
   const [modelName, setModelName] = useState("No model loaded");
   const [modelPath, setModelPath] = useState<string | null>(null);
   const [modelTags, setModelTags] = useState<string[]>([]);
@@ -957,7 +983,15 @@ const LlmServerPanel: React.FC<{
   };
 
   const startServer = async () => {
-    if (modelPathRef.current && localServerPathRef.current) {
+    if (!localServerPathRef.current?.trim()) {
+      // No executable configured: the user is running their own engine, so we
+      // own no process here and only pass requests through to its endpoint.
+      addLog(
+        "INFO",
+        `No server executable set — passing requests through to ${localServerUrlRef.current}`,
+      );
+      setStatus("Using existing inference server...");
+    } else if (modelPathRef.current) {
       setStatus("Starting llama.cpp server...");
       addLog("INFO", "Starting llama.cpp server…");
 
@@ -1043,9 +1077,19 @@ const LlmServerPanel: React.FC<{
     setVerboseSse(verbose);
     verboseSseRef.current = verbose;
 
-    if (!mp) {
+    // An empty server executable means the user runs their own engine, so
+    // there is no GGUF to describe — show the endpoint we proxy to instead.
+    if (!lsp?.trim()) {
+      setModelCardLabel("ACTIVE SERVER");
+      setModelName(describeEndpoint(lsu));
+      setModelPath(lsu);
+      setModelTags(["PASS-THROUGH"]);
+      setWelcomeVisible(false);
+    } else if (!mp) {
+      setWelcomeDismissible(false);
       setWelcomeVisible(true);
     } else {
+      setModelCardLabel("ACTIVE MODEL");
       setModelPath(mp);
       const filename = getFilenameFromPath(mp);
       setModelName(filename);
@@ -1153,7 +1197,16 @@ const LlmServerPanel: React.FC<{
         <div className="llm-content">
           <Header running={running} status={status} onSettings={goToSettings} />
           <PowerButton running={running} onToggle={handleToggle} />
-          <ModelCard name={modelName} path={modelPath || ""} tags={modelTags} />
+          <ModelCard
+            label={modelCardLabel}
+            name={modelName}
+            path={modelPath || ""}
+            tags={modelTags}
+            onChange={() => {
+              setWelcomeDismissible(true);
+              setWelcomeVisible(true);
+            }}
+          />
           <LogViewer
             logs={logs}
             verboseSse={verboseSse}
@@ -1171,9 +1224,24 @@ const LlmServerPanel: React.FC<{
 
       <WelcomeModal
         visible={welcomeVisible}
-        onClose={() => {
+        dismissible={welcomeDismissible}
+        onClose={(saved) => {
           setWelcomeVisible(false);
-          loadSettings();
+          if (!saved) return;
+
+          // Matches the settings-page flow: a live server keeps running against
+          // the backend it was started with until it is restarted.
+          const wasRunning = runningRef.current;
+          loadSettings()
+            .then(() => {
+              if (wasRunning) {
+                window.electronBridge.showAlert(
+                  "Backend changed",
+                  "Your new backend has been saved. Restart the server to switch over to it.",
+                );
+              }
+            })
+            .catch((e) => addLog("ERROR", `Failed to load settings: ${e.message}`));
         }}
       />
 
@@ -1353,6 +1421,26 @@ const cssStyles = `
 }
 .card-header {
   padding: 14px 16px 8px;
+}
+.card-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.card-change-btn {
+  background: transparent;
+  border: 1px solid rgba(71, 166, 255, 0.30);
+  border-radius: 7px;
+  padding: 4px 12px;
+  color: ${C.primary};
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+.card-change-btn:hover {
+  background-color: rgba(71, 166, 255, 0.12);
 }
 .card-body {
   display: flex;

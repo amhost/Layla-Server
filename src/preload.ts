@@ -64,6 +64,17 @@ contextBridge.exposeInMainWorld("electronBridge", {
     openFileDialog: () => ipcRenderer.invoke("dialog:openFile"),
 
     /**
+     * Check whether an OpenAI-compatible server (LM Studio, Ollama, a manually
+     * launched llama-server, …) is reachable at `baseUrl`, and list the models
+     * it is serving. Runs in the main process so no CORS policy applies.
+     */
+    probeBackend: (
+        baseUrl: string,
+    ): Promise<{ ok: boolean; models: string[]; error?: string }> => {
+        return ipcRenderer.invoke("backend:probe", baseUrl);
+    },
+
+    /**
      * Show an alert dialog with a message and optional title.
      */
     showAlert: (title: string, message: string) => ipcRenderer.invoke('dialog:alert', title, message),

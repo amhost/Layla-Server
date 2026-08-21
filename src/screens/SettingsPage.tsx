@@ -45,7 +45,8 @@ const SETTING_SECTIONS: {
       {
         key: UserSettingKey.LOCAL_SERVER_URL,
         label: "Server URL",
-        description: "Full endpoint URL for the local inference server.",
+        description:
+          "Full endpoint URL for the inference server. Point this at LM Studio, Ollama or any other OpenAI-compatible engine to use it instead.",
         type: "text",
         placeholder: "http://127.0.0.1:8080/v1/chat/completions",
         tag: "ENDPOINT",
@@ -53,7 +54,8 @@ const SETTING_SECTIONS: {
       {
         key: UserSettingKey.LOCAL_SERVER_PATH,
         label: "Server Executable",
-        description: "Path to the server binary (e.g. llama-server.exe).",
+        description:
+          "Path to the server binary (e.g. llama-server.exe). Leave empty to launch nothing and pass requests straight through to the Server URL above.",
         type: "file",
         tag: "PATH",
       },

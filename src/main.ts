@@ -73,6 +73,74 @@ ipcMain.on("open-external", (_event, url: string) => {
   shell.openExternal(url);
 });
 
+// ── External backend discovery ─────────────────────────────────────────────────
+// Probing runs in the main process rather than the renderer on purpose: the
+// renderer is a file:// page, so its Origin is "null" and third-party runtimes
+// (Ollama in particular) reject that at the CORS layer. Node has no CORS, so a
+// probe from here reports what is genuinely reachable.
+
+const PROBE_TIMEOUT_MS = 3_000;
+
+/** Strip any trailing slash / known endpoint path so we can append our own. */
+function normaliseBaseUrl(raw: string): string {
+  let base = raw.trim().replace(/\/+$/, "");
+  base = base.replace(/\/v1\/chat\/completions$/, "");
+  base = base.replace(/\/v1$/, "");
+  return base;
+}
+
+async function fetchJson(url: string): Promise<any> {
+  const res = await fetch(url, {
+    signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    headers: { Accept: "application/json" },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+/**
+ * Check whether an OpenAI-compatible server is listening at `baseUrl` and, if
+ * so, which models it is serving.
+ *
+ * Tries the OpenAI route first (llama-server, LM Studio and Ollama all expose
+ * `/v1/models`), then falls back to Ollama's native `/api/tags` for older
+ * builds that predate the compatibility layer.
+ */
+ipcMain.handle(
+  "backend:probe",
+  async (
+    _event,
+    baseUrl: string,
+  ): Promise<{ ok: boolean; models: string[]; error?: string }> => {
+    const base = normaliseBaseUrl(baseUrl);
+    if (!base) return { ok: false, models: [], error: "No URL provided" };
+
+    let firstError = "";
+
+    try {
+      const json = await fetchJson(`${base}/v1/models`);
+      const models: string[] = Array.isArray(json?.data)
+        ? json.data.map((m: any) => String(m?.id ?? "")).filter(Boolean)
+        : [];
+      return { ok: true, models };
+    } catch (err: any) {
+      firstError = err?.message ?? String(err);
+    }
+
+    try {
+      const json = await fetchJson(`${base}/api/tags`);
+      const models: string[] = Array.isArray(json?.models)
+        ? json.models.map((m: any) => String(m?.name ?? "")).filter(Boolean)
+        : [];
+      return { ok: true, models };
+    } catch {
+      /* fall through and report the OpenAI-route failure, which is the useful one */
+    }
+
+    return { ok: false, models: [], error: firstError };
+  },
+);
+
 let serverProcess: ChildProcess | null = null;
 
 function killProcess(child: ChildProcess): Promise<void> {
