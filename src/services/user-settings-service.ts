@@ -1,6 +1,12 @@
-function generatePassword(length: number = 16): string {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  return Array.from({ length }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+// 256-bit random authentication secret, hex-encoded
+function generateSecretKey(): string {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+
+  return Array.from(
+    bytes,
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
 }
 
 export enum UserSettingKey {
@@ -31,7 +37,7 @@ export const USER_SETTING_DEFAULTS: {
   [UserSettingKey.VISION_MODEL_PATH]: null,
   [UserSettingKey.LOCAL_SERVER_PATH]: './resources/server/llama-server.exe',
   [UserSettingKey.ADDITIONAL_SERVER_CMD_ARGS]: null,
-  [UserSettingKey.SERVER_SECRET_KEY]: generatePassword(),
+  [UserSettingKey.SERVER_SECRET_KEY]: generateSecretKey(),
   // Logging every SSE chunk drives a React state update per token. Sustained,
   // that grows renderer memory by hundreds of MB per long generation, so it is
   // opt-in and intended only for debugging a stream.
