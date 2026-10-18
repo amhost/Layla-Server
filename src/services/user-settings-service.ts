@@ -1,24 +1,19 @@
 export type SecretGenerationMethod = "crypto-hex" | "math-random";
 
-export function generateSecretKey(
-  method: SecretGenerationMethod = "crypto-hex",
-): string {
-  if (method === "math-random") {
-    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    return Array.from(
-      { length: 16 },
-      () => chars[Math.floor(Math.random() * chars.length)],
-    ).join("");
-  }
-
-  // 256-bit random authentication secret, hex-encoded
-  const bytes = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(bytes);
-
+function generateLegacySecretKey(): string {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   return Array.from(
-    bytes,
-    (byte) => byte.toString(16).padStart(2, "0"),
+    { length: 16 },
+    () => chars[Math.floor(Math.random() * chars.length)],
   ).join("");
+}
+
+export async function generateSecretKey(
+  method: SecretGenerationMethod = "math-random",
+): Promise<string> {
+  if (method === "math-random") return generateLegacySecretKey();
+  // Keep the existing stored option value while using Node crypto via IPC.
+  return window.electronBridge.generateCryptoSecret();
 }
 
 export enum UserSettingKey {
@@ -51,8 +46,8 @@ export const USER_SETTING_DEFAULTS: {
   [UserSettingKey.VISION_MODEL_PATH]: null,
   [UserSettingKey.LOCAL_SERVER_PATH]: './resources/server/llama-server.exe',
   [UserSettingKey.ADDITIONAL_SERVER_CMD_ARGS]: null,
-  [UserSettingKey.SERVER_SECRET_KEY]: generateSecretKey(),
-  [UserSettingKey.SECRET_GENERATION_METHOD]: "crypto-hex",
+  [UserSettingKey.SERVER_SECRET_KEY]: generateLegacySecretKey(),
+  [UserSettingKey.SECRET_GENERATION_METHOD]: "math-random",
   // Logging every SSE chunk drives a React state update per token. Sustained,
   // that grows renderer memory by hundreds of MB per long generation, so it is
   // opt-in and intended only for debugging a stream.

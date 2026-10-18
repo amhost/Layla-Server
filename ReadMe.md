@@ -89,8 +89,9 @@ Layla Server proxies to any OpenAI-compatible endpoint. To use a different infer
 
 ### Choosing a Secret Generator
 
-In Settings, **Secret Generator** offers secure random 64-character hex secrets
-(the default) or the original 16-character alphanumeric `Math.random()` secrets.
+In Settings, **Secret Generator** offers the original 16-character alphanumeric
+`Math.random()` secrets (the default) or secure 64-character hex secrets from
+Node's `node:crypto`, accessed through Electron's preload bridge.
 `Math.random()` is not cryptographically secure. Choosing a generator preserves
 your current secret. Click **Generate New Secret**, then **Save** to replace it,
 or enter your own secret in **Server Secret Key**. Restart the server and scan

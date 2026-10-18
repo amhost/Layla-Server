@@ -1,6 +1,6 @@
 // Run with: node --test test/secret-generation.test.cjs
 const assert = require("node:assert/strict");
-const { webcrypto } = require("node:crypto");
+const { randomBytes } = require("node:crypto");
 const path = require("node:path");
 const { test } = require("node:test");
 const vm = require("node:vm");
@@ -14,10 +14,12 @@ const bundle = buildSync({
   write: false,
 }).outputFiles[0].text;
 
-function loadSettings(values = new Map(), crypto = webcrypto) {
+function loadSettings(values = new Map(), bridge = {
+  generateCryptoSecret: async () => randomBytes(32).toString("hex"),
+}) {
   const context = {
     module: { exports: {} },
-    crypto,
+    window: { electronBridge: bridge },
     localStorage: {
       getItem: (key) => values.get(key) ?? null,
       setItem: (key, value) => values.set(key, value),
@@ -28,12 +30,12 @@ function loadSettings(values = new Map(), crypto = webcrypto) {
   return context.module.exports;
 }
 
-test("fresh installs default to a persistent secure 64-character hex secret", async () => {
+test("fresh installs default to a persistent 16-character Math.random secret", async () => {
   const values = new Map();
   const { default: settings, UserSettingKey: key } = loadSettings(values);
   const secret = await settings.getSetting(key.SERVER_SECRET_KEY);
-  assert.match(secret, /^[0-9a-f]{64}$/);
-  assert.equal(await settings.getSetting(key.SECRET_GENERATION_METHOD), "crypto-hex");
+  assert.match(secret, /^[A-Za-z0-9]{16}$/);
+  assert.equal(await settings.getSetting(key.SECRET_GENERATION_METHOD), "math-random");
   const reloaded = loadSettings(values);
   assert.equal(await reloaded.default.getSetting(key.SERVER_SECRET_KEY), secret);
 });
@@ -50,17 +52,18 @@ test("selecting and persisting a generator never replaces an existing secret", a
   assert.equal(await reloaded.default.getSetting(key.SERVER_SECRET_KEY), "legacySecret1234");
 });
 
-test("legacy generation uses Math.random and produces 16 alphanumeric characters", () => {
+test("legacy generation uses Math.random and produces 16 alphanumeric characters", async () => {
   let calls = 0;
   const context = {
     module: { exports: {} },
-    crypto: webcrypto,
+
     recordCall: () => calls++,
   };
   vm.createContext(context);
   vm.runInContext("Math.random = () => { recordCall(); return 0.5; }", context);
   vm.runInContext(bundle, context);
-  const secret = context.module.exports.generateSecretKey("math-random");
+  calls = 0;
+  const secret = await context.module.exports.generateSecretKey("math-random");
   assert.match(secret, /^[A-Za-z0-9]{16}$/);
   assert.equal(calls, 16);
 });
@@ -69,7 +72,7 @@ test("generating a replacement leaves storage unchanged until explicitly saved",
   const { default: settings, UserSettingKey: key, generateSecretKey } = loadSettings();
   await settings.saveSetting(key.SERVER_SECRET_KEY, "manual-key");
   for (const method of ["math-random", "crypto-hex"]) {
-    const replacement = generateSecretKey(method);
+    const replacement = await generateSecretKey(method);
     assert.equal(await settings.getSetting(key.SERVER_SECRET_KEY), "manual-key");
     await settings.saveSetting(key.SERVER_SECRET_KEY, replacement);
     assert.equal(await settings.getSetting(key.SERVER_SECRET_KEY), replacement);
@@ -78,12 +81,35 @@ test("generating a replacement leaves storage unchanged until explicitly saved",
 });
 
 test("secure generation failure never falls back to a legacy secret or changes storage", async () => {
-  const crypto = {
-    getRandomValues(bytes) { return webcrypto.getRandomValues(bytes); },
-  };
-  const { default: settings, UserSettingKey: key, generateSecretKey } = loadSettings(new Map(), crypto);
+  const bridge = { generateCryptoSecret: async () => { throw new Error("random source unavailable"); } };
+  const { default: settings, UserSettingKey: key, generateSecretKey } = loadSettings(new Map(), bridge);
   const original = await settings.getSetting(key.SERVER_SECRET_KEY);
-  crypto.getRandomValues = () => { throw new Error("random source unavailable"); };
-  assert.throws(() => generateSecretKey("crypto-hex"), /random source unavailable/);
+  await assert.rejects(generateSecretKey("crypto-hex"), /random source unavailable/);
   assert.equal(await settings.getSetting(key.SERVER_SECRET_KEY), original);
+});
+
+test("secure generation uses the preload IPC bridge and Node crypto handler", async () => {
+  const handlers = new Map();
+  const bundleNode = (file) => buildSync({
+    entryPoints: [path.join(__dirname, '../src', file)],
+    bundle: true, platform: 'node', format: 'cjs', external: ['electron'], write: false,
+  }).outputFiles[0].text;
+  vm.runInNewContext(bundleNode('main.ts'), {
+    exports: {}, require: (name) => name === 'electron' ? {
+      app: { whenReady: () => new Promise(() => {}), on() {} },
+      ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} },
+    } : require(name),
+    process, console, __dirname,
+  });
+  let bridge;
+  vm.runInNewContext(bundleNode('preload.ts'), {
+    require: (name) => name === 'electron' ? {
+      contextBridge: { exposeInMainWorld: (_name, api) => { bridge = api; } },
+      ipcRenderer: { invoke: async (name) => handlers.get(name)() },
+    } : require(name),
+  });
+  const { generateSecretKey } = loadSettings(new Map(), bridge);
+  const secret = await generateSecretKey('crypto-hex');
+  assert.match(secret, /^[0-9a-f]{64}$/);
+  assert.notEqual(await generateSecretKey('crypto-hex'), secret);
 });

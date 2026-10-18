@@ -80,11 +80,11 @@ const SETTING_SECTIONS: {
         options: [
           {
             value: "crypto-hex",
-            label: "Secure random — 64-character hex (recommended)",
+            label: "Node crypto — 64-character hex",
           },
           {
             value: "math-random",
-            label: "Math.random() — 16-character legacy secret",
+            label: "Math.random() — 16-character secret (default)",
           },
         ],
         tag: "SECRET",
@@ -762,13 +762,14 @@ const SettingsPage: React.FC<SettingsPageProps> = ({ onBack }) => {
     [handleChange],
   );
 
-  const handleGenerateSecret = useCallback(() => {
+  const handleGenerateSecret = useCallback(async () => {
     if (!settings) return;
     try {
       const method = settings[
         UserSettingKey.SECRET_GENERATION_METHOD
       ] as SecretGenerationMethod;
-      handleChange(UserSettingKey.SERVER_SECRET_KEY, generateSecretKey(method));
+      const secret = await generateSecretKey(method);
+      handleChange(UserSettingKey.SERVER_SECRET_KEY, secret);
     } catch {
       showToast("Failed to generate secret. Your current secret was kept.");
     }
