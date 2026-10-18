@@ -1,5 +1,17 @@
-// 256-bit random authentication secret, hex-encoded
-function generateSecretKey(): string {
+export type SecretGenerationMethod = "crypto-hex" | "math-random";
+
+export function generateSecretKey(
+  method: SecretGenerationMethod = "crypto-hex",
+): string {
+  if (method === "math-random") {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    return Array.from(
+      { length: 16 },
+      () => chars[Math.floor(Math.random() * chars.length)],
+    ).join("");
+  }
+
+  // 256-bit random authentication secret, hex-encoded
   const bytes = new Uint8Array(32);
   globalThis.crypto.getRandomValues(bytes);
 
@@ -16,6 +28,7 @@ export enum UserSettingKey {
   LOCAL_SERVER_PATH = 'local-server-path',
   ADDITIONAL_SERVER_CMD_ARGS = 'additional-server-cmd-args',
   SERVER_SECRET_KEY = 'server-secret-key',
+  SECRET_GENERATION_METHOD = 'secret-generation-method',
   VERBOSE_SSE_LOGGING = 'verbose-sse-logging',
 }
 
@@ -26,6 +39,7 @@ type UserSettingDefaults = {
   [UserSettingKey.LOCAL_SERVER_PATH]: string;
   [UserSettingKey.ADDITIONAL_SERVER_CMD_ARGS]: string | null;
   [UserSettingKey.SERVER_SECRET_KEY]: string;
+  [UserSettingKey.SECRET_GENERATION_METHOD]: SecretGenerationMethod;
   [UserSettingKey.VERBOSE_SSE_LOGGING]: boolean;
 };
 
@@ -38,6 +52,7 @@ export const USER_SETTING_DEFAULTS: {
   [UserSettingKey.LOCAL_SERVER_PATH]: './resources/server/llama-server.exe',
   [UserSettingKey.ADDITIONAL_SERVER_CMD_ARGS]: null,
   [UserSettingKey.SERVER_SECRET_KEY]: generateSecretKey(),
+  [UserSettingKey.SECRET_GENERATION_METHOD]: "crypto-hex",
   // Logging every SSE chunk drives a React state update per token. Sustained,
   // that grows renderer memory by hundreds of MB per long generation, so it is
   // opt-in and intended only for debugging a stream.
